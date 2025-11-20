@@ -1,0 +1,348 @@
+---
+title: "700Final"
+author: "Yuezhou Qu"
+date: "12/5/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(synthdid)
+library(rngtools)
+library(future)
+library(doFuture)
+library(future.batchtools)
+library(xtable)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+```
+
+# California
+
+### Estimators
+
+```{r}
+mc_estimate = function(Y, N0, T0) {
+    N1=nrow(Y)-N0
+    T1=ncol(Y)-T0
+    W <- outer(c(rep(0,N0),rep(1,N1)),c(rep(0,T0),rep(1,T1)))
+    mc_pred <- mcnnm_cv(Y, 1-W, num_lam_L = 20)
+    mc_fit  <- mc_pred$L + outer(mc_pred$u, mc_pred$v, '+')
+    mc_est <- sum(W*(Y-mc_fit))/sum(W)
+    mc_est
+}
+mc_placebo_se = function(Y, N0, T0, replications=200) {
+    N1 = nrow(Y) - N0
+    theta = function(ind) { mc_estimate(Y[ind,], length(ind)-N1, T0) }
+    sqrt((replications-1)/replications) * sd(replicate(replications, theta(sample(1:N0))))
+}
+
+difp_estimate = function(Y, N0, T0) {
+    synthdid_estimate(Y, N0, T0, weights=list(lambda=rep(1/T0, T0)), eta.omega=1e-6)
+}
+
+sc_estimate_reg = function(Y, N0, T0) {
+    sc_estimate(Y, N0, T0, eta.omega=((nrow(Y)-N0)*(ncol(Y)-T0))^(1/4))
+}
+difp_estimate_reg = function(Y, N0, T0) {
+    synthdid_estimate(Y, N0, T0, weights=list(lambda=rep(1/T0, T0)))
+}
+
+
+estimators = list(did=did_estimate,
+                  sc=sc_estimate,
+                  sdid=synthdid_estimate)
+                  #difp=difp_estimate,
+                  #sc_reg = sc_estimate_reg,
+                  #difp_reg = difp_estimate_reg)
+```
+
+
+```{r}
+data('california_prop99')
+setup = panel.matrices(california_prop99)
+
+estimates = lapply(estimators, function(estimator) { estimator(setup$Y, setup$N0, setup$T0) } )
+print(estimates)
+standard.errors = mapply(function(estimate, name) {
+  sqrt(vcov(estimate, method='placebo'))
+}, estimates, names(estimators))
+print(standard.errors)
+```
+
+
+```{r}
+library(synthdid)
+
+# Estimate the effect of California Proposition 99 on cigarette consumption
+data('california_prop99')
+setup = panel.matrices(california_prop99)
+tau.hat = synthdid_estimate(setup$Y, setup$N0, setup$T0)
+se.methods = c('bootstrap', 'jackknife', 'placebo')
+se = sqrt(vcov(tau.hat, method='placebo'))
+sprintf('point estimate: %1.2f', tau.hat)
+sprintf('95%% CI (%1.2f, %1.2f)', tau.hat - 1.96 * se, tau.hat + 1.96 * se)
+plot(tau.hat)
+
+se2 = sqrt(vcov(tau.hat, method='jackknife'))
+sprintf('95%% CI (%1.2f, %1.2f)', tau.hat - 1.96 * se2, tau.hat + 1.96 * se2)
+se3 = sqrt(vcov(tau.hat, method='bootstrap'))
+sprintf('95%% CI (%1.2f, %1.2f)', tau.hat - 1.96 * se3, tau.hat + 1.96 * se3)
+```
+### Figure 1
+
+```{r}
+synthdid_plot(estimates[1:3], facet.vertical=FALSE,
+              control.name='control', treated.name='california',
+              lambda.comparable=TRUE, se.method = 'none',
+              trajectory.linetype = 1, line.width=.75, effect.curvature=-.4,
+              trajectory.alpha=.7, effect.alpha=.7,
+              diagram.alpha=1, onset.alpha=.7) +
+    theme(legend.position=c(.26,.07), legend.direction='horizontal',
+          legend.key=element_blank(), legend.background=element_blank(),
+          strip.background=element_blank(), strip.text.x = element_blank())
+```
+
+
+```{r}
+synthdid_units_plot(rev(estimates[1:3]), se.method='none') +
+    theme(legend.background=element_blank(), legend.title = element_blank(),
+          legend.direction='horizontal', legend.position=c(.17,.07),
+          strip.background=element_blank(), strip.text.x = element_blank())
+```
+
+
+```{r}
+setup = panel.matrices(california_prop99)
+estimate = synthdid_estimate(setup$Y, setup$N0, setup$T0)
+
+top.controls = synthdid_controls(estimate)[1:10, , drop=FALSE]
+plot(estimate, spaghetti.units=rownames(top.controls))
+```
+
+```{r}
+estimate.sc = sc_estimate(setup$Y, setup$N0, setup$T0)
+with.overlay = function(est, s) { attr(est,'overlay') = s; est }
+estimators = function(s) {
+  estimator.list = list(with.overlay(estimate, s), estimate.sc, estimate)
+  names(estimator.list)=c('synth. diff-in-diff', 'synth. control', '')
+  estimator.list
+}
+
+plot.estimators = function(ests, alpha.multiplier) {
+  p = synthdid_plot(ests, se.method='none',
+                alpha.multiplier=alpha.multiplier, facet=rep(1,length(ests)),
+            trajectory.linetype = 1, effect.curvature=-.4,
+            trajectory.alpha=.5, effect.alpha=.5, diagram.alpha=1)
+  suppressMessages(p + scale_alpha(range=c(0,1), guide='none'))
+  # scale alpha so alpha=0 means totally invisible, which is unusual but useful
+  # for hiding our invisible estimate. We have to suppress a warning that 
+  # we're overriding an extant alpha scale that's added in synthdid_plot 
+}
+
+# set up the box we zoom in on in plot 5
+lambda = attr(estimate, 'weights')$lambda
+time = as.integer(timesteps(setup$Y))
+xbox.ind = c(which(lambda > .01)[1], setup$T0+4)
+xbox = time[xbox.ind] + c(-.5,.5)
+ybox = range(setup$Y[setup$N0+1, min(xbox.ind):(max(xbox.ind))]) + c(-4,4)
+
+
+p1 = plot.estimators(estimators(0),   alpha.multiplier=c(1,.1,0))
+p2 = plot.estimators(estimators(.75), alpha.multiplier=c(1,.1,0))
+p3 = plot.estimators(estimators(1),   alpha.multiplier=c(1,.1,0))
+p4 = plot.estimators(estimators(1),   alpha.multiplier=c(1, 1,0))
+p4.zoom = p4 + coord_cartesian(xlim=xbox, ylim=ybox) + xlab('') + ylab('') +
+    theme(axis.ticks.x= element_blank(), axis.text.x = element_blank(),
+          axis.ticks.y=element_blank(), axis.text.y=element_blank(),
+          legend.position='off')
+p5 = p4 + annotation_custom(ggplotGrob(p4.zoom), xmin = 1968,   # location by
+                            xmax = 1984.7,   ymin=2, ymax=95) + # trial and error
+            geom_rect(aes(xmin=min(xbox), xmax=max(xbox),
+                          ymin=min(ybox), ymax=max(ybox)),
+                      color=alpha('black', .25), size=.3, fill=NA)
+
+
+plot.theme = theme(legend.position=c(.9,.85), legend.direction='vertical',
+                   legend.key=element_blank(), legend.background=element_blank())
+
+p1 + plot.theme
+p2 + plot.theme
+p3 + plot.theme
+p4 + plot.theme
+p5 + plot.theme
+```
+
+
+```{r}
+unit.weights = synthdid_controls(estimates[1:3], weight.type='omega', mass=1)
+time.weights = synthdid_controls(estimates[1:3], weight.type='lambda', mass=1)
+
+unit.table = xtable(round(unit.weights[rev(1:nrow(unit.weights)), ], 3))
+time.table = xtable(round(time.weights, 3))
+
+print(unit.table, type='latex')
+print(time.table, type='latex')
+
+unit.table
+```
+
+
+### Placebo Simulation
+
+```{r}
+last.col = function(X) { X[, ncol(X)] }
+
+data(CPS)
+Y.logwage      = panel.matrices(CPS, treatment='min_wage', outcome='log_wage', treated.last=FALSE)$Y
+Y.hours        = panel.matrices(CPS, treatment='min_wage', outcome='hours',    treated.last=FALSE)$Y
+Y.urate        = panel.matrices(CPS, treatment='min_wage', outcome='urate',    treated.last=FALSE)$Y
+w.minwage      = last.col(panel.matrices(CPS, treatment='min_wage',   treated.last=FALSE)$W)
+w.gunlaw       = last.col(panel.matrices(CPS, treatment='open_carry', treated.last=FALSE)$W)
+w.abortion     = last.col(panel.matrices(CPS, treatment='abort_ban',  treated.last=FALSE)$W)
+
+data(PENN)
+Y.loggdp       = panel.matrices(PENN, treatment='dem', outcome='log_gdp', treated.last=FALSE)$Y
+w.democracy    = last.col(panel.matrices(PENN, treatment='dem',  treated.last=FALSE)$W)
+w.education    = last.col(panel.matrices(PENN, treatment='educ', treated.last=FALSE)$W)
+
+default=list(rank = 4, N1 = 10, T1 = 10)
+cps.baseline.params  = estimate_dgp(Y.logwage, w.minwage, default$rank)
+```
+
+
+```{r}
+simulator = function(params = cps.baseline.params,
+                     F=function(x){x}, M=function(x){x},
+                     Sigma = function(x){x}, pi = function(x){x},
+                     ar_coef = function(x){x},
+                     N1=default$N1, T1=default$T1, resample=NULL) {
+
+    updated.params = list(F=F(params$F), M=M(params$M),
+                          Sigma=Sigma(params$Sigma), pi = pi(params$pi),
+                          ar_coef=ar_coef(params$ar_coef))
+
+    list(params=updated.params, N1=N1, T1=T1,
+         run=function() {
+             if(!is.numeric(resample)) {
+                simulate_dgp(updated.params, N1, T1)
+             } else {
+                ind = sample.int(nrow(updated.params$F), size=resample, replace=TRUE)
+                resampled.params=updated.params
+                resampled.params$F=updated.params$F[ind,]
+                resampled.params$M=updated.params$M[ind,]
+                simulate_dgp(resampled.params, N1, T1)
+            }
+        })
+}
+```
+
+```{r}
+simulators = list(
+    baseline   =  simulator(),
+    # Modified outcome model
+    no.corr    =  simulator(Sigma=function(Sigma) { diag(nrow(Sigma)) * norm(Sigma,'f')/sqrt(nrow(Sigma))},
+                            ar_coef=function(coefs) { 0*coefs }),
+    no.M       =  simulator(M=function(M) { 0*M }),
+    no.F       =  simulator(F=function(F) { 0*F }),
+    only.noise =  simulator(M=function(M) { 0*M }, F=function(F) {0*F}),
+    no.noise   =  simulator(Sigma=function(Sigma) { 0*Sigma }, ar_coef=function(coefs) { 0*coefs }),
+    # Modified assignment process
+    gun.law    =  simulator(estimate_dgp(Y.logwage, w.gunlaw,   default$rank)),
+    abortion   =  simulator(estimate_dgp(Y.logwage, w.abortion, default$rank)),
+    random     =  simulator(pi=function(pi) { rep(.5,length(pi)) }),
+    # Modified outcome variable
+    hours      =  simulator(estimate_dgp(Y.hours,   w.minwage,  default$rank)),
+    urate      =  simulator(estimate_dgp(Y.urate,   w.minwage,  default$rank)),
+    # Assignment block size
+    T1.is.one  = simulator(T1=1),
+    N1.is.one  = simulator(N1=1),
+    blocksize.is.one = simulator(T1=1, N1=1),
+    # Resample rows (from Table 4)
+    resample.200 = simulator(resample=200, N1=20),
+    resample.400 = simulator(resample=400, N1=40),
+    # penn world table (Table 3)
+    penn.democracy  = simulator(estimate_dgp(Y.loggdp,  w.democracy, default$rank)),
+    penn.education  = simulator(estimate_dgp(Y.loggdp,  w.education, default$rank)),
+    penn.random     = simulator(estimate_dgp(Y.loggdp,  w.education, default$rank),
+                                pi=function(pi) { rep(.5,length(pi)) }))
+```
+
+```{r}
+sim.replications  = 1000
+coverage.replications = 400
+coverage.estimators = c('sdid','sc', 'did', 'difp')
+coverage.sims = c('baseline',  'gun.law', 'abortion', 'random', 'hours', 'urate',
+                  'T1.is.one', 'N1.is.one', 'blocksize.is.one',
+                  'resample.200', 'resample.400',
+                  'penn.democracy', 'penn.education', 'penn.random')
+se.methods = c('bootstrap', 'jackknife', 'placebo')
+cluster = file.exists('batchtools.slurm.tmpl')
+
+# set up simulation grid
+grid = expand.grid(ss = 1:length(simulators),
+                   ee = 1:length(estimators),
+                   rr = 1:sim.replications)
+grid$estimate.se = names(simulators[grid$ss]) %in%  coverage.sims &
+                         names(estimators[grid$ee]) %in%  coverage.estimators &
+                         grid$rr <= coverage.replications
+
+# associate a grid row to an output filename
+output.file = function(row) {
+    sprintf('simulations/simulation-%s-%s-%d.rds',
+            names(simulators)[row$ss], names(estimators)[row$ee], row$rr)
+}
+rows.finished = function() {
+    output.files = sapply(1:nrow(grid), function(ii) { output.file(grid[ii,]) })
+    file.exists(output.files)
+}
+```
+
+
+### Simulation with data created myself
+
+```{r}
+set.seed(42)
+
+# Define parameters
+N <- 30  # total number of units
+T <- 10  # total number of time periods
+N_co <- 29  # number of control units
+T_pre <- 8  # number of pre-treatment time periods
+tau <- 1.5  # treatment effect
+
+# Generate the factors for L
+U <- matrix(rnorm(N), ncol = 1)
+D <- diag(runif(1, 1, 2))
+V <- matrix(rnorm(T), ncol = 1)
+L <- U %*% D %*% t(V)
+
+# Generate W and treatment effects
+W <- matrix(0, nrow = N, ncol = T)
+W[(N_co+1):N, (T_pre+1):T] <- 1  # block assignment: treated after T_pre
+tau_it <- W * tau
+
+# Generate errors E
+E <- matrix(rnorm(N * T), nrow = N)
+
+# Generate observed data Y
+Y <- L + tau_it + E
+
+# Convert Y to a data frame for a better view
+Y_df <- as.data.frame(Y)
+names(Y_df) <- paste("Time", 1:T, sep = "_")
+Y_df$Unit <- paste("Unit", 1:N, sep = "_")
+
+# Print the first few rows of the generated panel data
+head(Y_df)
+```
+
+
+
+
