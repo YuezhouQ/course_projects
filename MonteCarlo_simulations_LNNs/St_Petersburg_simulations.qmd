@@ -1,0 +1,211 @@
+---
+title: "St. Petersburg Game Simulations"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+editor: visual
+---
+
+```{r}
+library(stpetersburg) 
+?simulate_stpetersburg_experiment
+library(ggplot2) 
+library(dplyr) 
+library(tidyr)
+```
+
+### 1. Introduction
+
+The St. Petersburg game is a classical example where "infinite expectation" collides with our intuition about averages. In the usual formulation, we toss a fair coin until the first head appears. If the first head occurs on toss $k$, the payoff is $2^k$ dollars. The payoff $X$ therefore takes values in $\{2,4,8, \ldots\}$ with
+
+$$
+\mathbb{P}\left(X=2^k\right)=2^{-k}, \quad k \geq 1 .
+$$
+
+A quick computation shows
+
+$$
+\mathbb{E}[X]=\sum_{k=1}^{\infty} 2^k 2^{-k}=\sum_{k=1}^{\infty} 1=\infty,
+$$
+
+so the game has infinite expected value, even though no reasonable player would pay an arbitrarily large entry fee. This tension is the classical "St. Petersburg paradox." Indeed, the simulation below shows that the mean seems to be increasing as $n$ increases, though with a very slow rate.
+
+```{r}
+# Simulation parameters  
+set.seed(123)   # set seed for reproducibility  
+B <- 1000  
+n_values <- c(100, 1000, 10000)  
+
+# Run simulation experiment for each n and combine results  
+sim_list <- lapply(n_values, function(n) {  
+  simulate_stpetersburg_experiment(n = n, B = B)  
+})  
+sim_data <- do.call(rbind, sim_list)  
+
+head(sim_list[[1]])
+head(sim_list[[2]])
+head(sim_list[[3]])
+```
+
+### 2. Simulation of the Scaled Average $A_n$
+
+To study empirical behavior, denote $X_1, X_2, \ldots$ i.i.d. payoffs from repeated plays, with partial sums
+
+$$
+S_n=X_1+\cdots+X_n .
+$$
+
+Because $\mathbb{E}\left[X_1\right]=\infty$, the usual strong law of large numbers for $S_n / n$ fails. However, we can consider
+
+$$
+A_n=\frac{S_n}{n \log _2 n}, \text{ and } A_n \xrightarrow{\mathbb{P}} 1.
+$$
+
+Thus, a weak law with the $n \log _2 n$ scaling still holds, even though the mean is infinite. Here, we first examine the distribution of the scaled sample mean $A_n = \frac{S_n}{\,n \log_2 n\,}$ for different sample sizes. If the theory holds, $A_n$ should concentrate around 1 as $n$ increases, though very slowly. We simulate the empirical CDFs of $A_n$ below across 1000 simulations:
+
+```{r}
+summary(sim_data$A_n)
+
+# Plot ECDFs of A_n for each sample size  
+ggplot(sim_data, aes(x = A_n, color = factor(n))) +  
+  stat_ecdf(linewidth = 1) +  
+  labs(x = expression(A[n] == S[n] / (n * log[2]*n)),  
+       color = "Sample size n",  
+       title = "ECDF of Scaled Mean A_n",  
+       subtitle = "St. Petersburg game simulations for n = 100, 1000, 10000") +  
+  theme_minimal()  
+
+# Zoom in
+ggplot(sim_data, aes(x = A_n, color = factor(n))) +  
+  stat_ecdf(linewidth = 1) +  
+  xlim(0, 5) + 
+  labs(x = expression(A[n] == S[n] / (n * log[2]*n)),  
+       color = "Sample size n",  
+       title = "ECDF of Scaled Mean A_n",  
+       subtitle = "St. Petersburg game simulations for n = 100, 1000, 10000") +  
+  theme_minimal()  
+```
+
+This confirms that $A_n$ does tend toward 1, but the convergence is extremely slow. Even at $n=10000$, there is substantial probability mass away from 1, reflecting the heavy-tail variability in sums. Next, we estimate $P(|A_n - 1| \le \varepsilon)$ for a few tolerance levels $\varepsilon$:
+
+```{r}
+# Define tolerance levels  
+epsilons <- c(0.1, 0.25, 0.5)  
+
+# Compute probability that A_n is within eps of 1 for each n  
+prob_est <- expand.grid(n = n_values, eps = epsilons)  
+prob_est$P <- NA  
+for (i in seq_len(nrow(prob_est))) {  
+  n_i   <- prob_est$n[i]  
+  eps_i <- prob_est$eps[i]  
+  # extract A_n values for this n  
+  A_vals <- sim_data$A_n[ sim_data$n == n_i ]  
+  # estimate probability  
+  prob_est$P[i] <- mean( abs(A_vals - 1) <= eps_i )  
+}  
+print(prob_est)  
+```
+
+In theory, this probability should converge to 1 as $n$ increases. However, we see that even for $n=10000$, about 30% of 1000 runs had $A_n$ within $1\pm 0.1$, 57% were within $1\pm 0.25$, and 73% were within $1\pm 0.5$. Although the probability is increasing to 1 as $n$ increases, the rate of convergence is very slow.
+
+### 3. Rare Extreme Payoffs and Outlier Counts
+
+We investigate the occurrence of rare, extremely large payoffs that drive the variability. Using Borel-Cantelli, one can find constants $c>0$ such that the events
+
+$$
+\left\{X_k \geq c k \log _2 k\right\}
+$$
+
+occur infinitely often with probability one; each such "monster payoff" forces $S_k /\left(k \log _2 k\right)$ to make a large upward jump, preventing almost sure convergence. A convenient way to quantify these rare extremes is through the outlier count
+
+$$
+N_n(c)=\sum_{k \leq n} 1\left\{X_k \geq c k \log _2 k\right\} .
+$$
+
+This roughly counts how many data points are “unusually large” relative to the expected scale at that position. Since
+
+$$
+\mathbb{P}\left(X_k \geq c k \log _2 k\right) \approx \frac{\text { const }}{k \log k}
+$$
+
+one gets
+
+$$
+\mathbb{E}\left[N_n(c)\right] \asymp \frac{1}{c} \log \log n,
+$$
+
+so the expected number of extreme observations grows (very slowly) without bound. This logarithmic divergence underlies the failure of the strong law: with probability one, we see infinitely many huge payoffs that keep reshaping the average.
+
+```{r}
+# Compute average N_n(c) for each sample size  
+avg_N <- aggregate(N_n ~ n, data = sim_data, FUN = mean)  
+print(avg_N)  
+```
+
+We see average $N_n(10)$ grows slowly with $n$. Although in most runs for our $n$, only one extremely large outlier occurs, but the chance of seeing at least one such outlier keeps increasing with $n$. As we repeat our experiemnts, no matter how large $n$ gets, there will eventually be runs with new, huge payouts. This aligns with the idea that the strong law of large numbers fails here, that rare outliers continue to appear and prevent almost-sure convergence.
+
+### 4. Contribution of the Maximum to the Sum
+
+Given the tendency for a single payoff to dominate, denote
+
+$$
+M_n=\max _{k \leq n} X_k.
+$$
+
+Typically $M_n$ is of the same order as $n \log _2 n$, and single largest rewards can contribute a nonnegligible fraction of $S_n$. Here, we examine the ratio $M_n/S_n$. Below is a histogram of $M_n/S_n$ for $n=10000$:
+
+```{r}
+# Add a column for the ratio M_n / S_n  
+sim_data$max_frac <- sim_data$M_n / sim_data$S_n  
+
+# Plot histogram of M_n/S_n for the largest sample size n=10000  
+library(scales)  # for percentage formatting (optional)  
+ggplot(subset(sim_data, n == 10000), aes(x = max_frac)) +  
+  geom_histogram(bins = 20, color="black", fill="skyblue") +  
+  scale_x_continuous(labels = percent_format(accuracy=1)) +  
+  labs(x = expression(M[n] / S[n]),  
+       y = "Frequency (out of 1000 runs)",  
+       title = "Histogram of M_n / S_n (n = 10000)") +  
+  theme_minimal()  
+```
+
+In a significant fraction of the $n=10000$ runs, the largest single payoff accounts for over half of the total sum (note the mass of simulations where $M_n/S_n > 0.5$). In some cases this ratio is very close to 1, meaning one observation was almost the entire sum. This demonstrates how **one huge win can dominate** the outcomes. When no extremely large value occurs, $M_n/S_n$ is lower (e.g. 10–30%), but the distribution’s long right tail ensures that often one big payout dwarfs the rest. As $n$ grows, the chance of at least one gigantic payoff increases, so runs where $M_n \approx S_n$ become more common. This reinforces why the sample mean varies so much – it is often effectively determined by the single largest observation in the sample.
+
+### 5. Robust Estimators: Comparison of Mean, Trimmed Mean, and Median-of-Means
+
+Finally, we compare the behavior of three estimators of the “central value” in this heavy-tailed setting: the ordinary sample mean, a 10% trimmed mean, and a median-of-means (with 10 equal blocks). If we cap the payoff at a bankroll level $W$, replacing $X$ by $X \wedge W$, the expectation becomes finite and behaves like
+
+$$
+\mathbb{E}[X \wedge W] \sim \log _2 W,
+$$
+
+and then the classical strong law applies:
+
+$$
+\frac{1}{n} \sum_{k=1}^n\left(X_k \wedge W\right) \xrightarrow{\text { a.s. }} \mathbb{E}[X \wedge W] .
+$$
+
+Truncation thus restores "law-of-large-numbers-like" behavior at the cost of ignoring extremely large payoffs beyond $W$.
+
+We use boxplots (on a log scale) to visualize the distribution of each estimator across the 1000 runs, for each sample size:
+
+```{r}
+# Prepare data in long format for boxplots  
+est_data <- sim_data %>%  
+  select(n, mean, trimmed, median_of_means) %>%  
+  pivot_longer(cols = c("mean", "trimmed", "median_of_means"),  
+               names_to = "estimator", values_to = "value")  
+
+# Boxplot comparison of estimators, y-axis on log2 scale for clarity  
+ggplot(est_data, aes(x = factor(n), y = value, fill = estimator)) +  
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.8)) +  
+  scale_y_continuous(trans = 'log2', name = "Estimator Value (log2 scale)") +  
+  labs(x = "Sample size n", fill = "Estimator",  
+       title = "Comparison of Mean, Trimmed Mean, and Median-of-Means") +  
+  theme_minimal()  
+```
+
+These boxplots highlight the instability of the ordinary mean and the gains from using robust estimators. For each $n$, the sample mean (purple) shows a wide spread – its median increases slowly with $n$ (roughly proportional to $\log_2 n$) and the upper whiskers extend dramatically due to occasional runs with enormous means (caused by one or two huge payouts). The 10% trimmed mean (green) is more stable: cutting off the top 10% outliers reduces the extreme upper tail, lowering the median and compressing the interquartile range. However, it can still exhibit variability when moderately large values occur (since only the most extreme values are removed). The median-of-means (orange) is most stable. Its distribution is tight and centered much lower than the mean’s – even as $n$ grows, the median-of-means yields a comparatively moderate estimate. By taking medians of block averages, this estimator avoids being thrown off by any single block’s outlier. We see that using robust methods significantly reduces the variance of the estimator: unlike the raw mean, which can be unbounded, the robust estimators give more reliable results for each finite $n$. It’s worth noting that they are estimating a different quantity (effectively a truncated or “typical” value rather than the infinite mean), but in practice such estimators are invaluable for heavy-tailed data. In summary, the trimmed mean and especially the median-of-means provide much tighter and more predictable estimates in the St. Petersburg game, highlighting an effective strategy to cope with heavy tails.
+
+### Acknowledgement: This project made use of ChatGPT-5 to assist with generating coding ideas, debugging, and refining the writing.

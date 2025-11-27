@@ -1,0 +1,896 @@
+---
+title: "501Final_Project"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+editor: visual
+---
+
+## 1. Loading Data
+
+```{r}
+# Load required libraries and the helper script
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(data.table)
+
+## Modeling / GAM / regularization
+library(mgcv)
+library(glmnet)
+library(igraph)
+library(pbapply)
+
+source("~/Desktop/Projects/ADHD200/adhd200_helper.R")
+
+# Define data directories for training and testing (adjust the path as needed)
+base_dir   <- "~/Desktop/Projects/ADHD200/ADHD200_data"
+train_dir  <- file.path(base_dir, "AAL")       # training data directory
+test_dir   <- file.path(base_dir, "Test_AAL")  # testing data directory
+# Load the consolidated phenotypic data
+phenofile <- list.files(base_dir, pattern="adhd200.*phenotypics.*\\.tsv$", full.names=TRUE, ignore.case=TRUE)
+pheno_all <- read.delim(phenofile, stringsAsFactors=FALSE)
+cat("Phenotypic table: ", nrow(pheno_all), " subjects × ", ncol(pheno_all), " variables loaded.\n", sep="")
+```
+
+### 1.1 Processing Train Data
+
+```{r}
+train_index <- index_time_series(train_dir, pheno_all)
+cat("Training data indexing:\n")
+cat(" Files indexed: ", nrow(train_index), "\n",
+" Distinct subjects (before run filter): ", length(unique(train_index$ScanDir.ID)), "\n\n", sep="")
+
+train_index_subj <- filter_runs(train_index)
+cat("After run selection (one scan per subject):\n")
+cat(" Subjects in training set: ", nrow(train_index_subj), "\n\n", sep="")
+
+train_index_small <- train_index_subj %>% select(ScanDir.ID, filepath) # minimal columns needed
+train_conn <- compute_connectivity(train_index_small, fisher=TRUE)
+cat("Training connectivity matrix:\n")
+cat(" Rows (subjects): ", nrow(train_conn), "\n",
+" Columns (ID + edges): ", ncol(train_conn), "\n\n", sep="")
+
+train_analysis <- merge_conn_pheno(train_conn, pheno_all)
+cat("Training analysis dataset (before QC):\n")
+cat(" Rows: ", nrow(train_analysis), "\n",
+" Columns: ", ncol(train_analysis), "\n\n", sep="")
+train_analysis_qc <- filter_by_qc(train_analysis)
+
+dim_train <- dim(train_analysis_qc)
+cat("Training analysis dataset after QC: ", dim_train[1], " × ", dim_train[2], "\n", sep="")
+```
+
+### 1.2 Processing Test Data
+
+```{r}
+test_index <- index_time_series(test_dir, pheno_all)
+cat("Testing data indexing:\n")
+cat(" Files indexed: ", nrow(test_index), "\n",
+" Distinct subjects (before run filter): ", length(unique(test_index$ScanDir.ID)), "\n\n", sep="")
+
+test_index_subj <- filter_runs(test_index)
+cat("After run selection (one scan per subject):\n")
+cat(" Subjects in testing set: ", nrow(test_index_subj), "\n\n", sep="")
+
+test_index_small <- test_index_subj %>% select(ScanDir.ID, filepath)
+test_conn <- compute_connectivity(test_index_small, fisher=TRUE)
+cat("Testing connectivity matrix:\n")
+cat(" Rows (subjects): ", nrow(test_conn), "\n",
+" Columns (ID + edges): ", ncol(test_conn), "\n\n", sep="")
+
+test_analysis <- merge_conn_pheno(test_conn, pheno_all)
+cat("Testing analysis dataset (before QC):\n")
+cat(" Rows: ", nrow(test_analysis), "\n",
+" Columns: ", ncol(test_analysis), "\n\n", sep="")
+test_analysis_qc <- filter_by_qc(test_analysis)
+dim_test <- dim(test_analysis_qc)
+cat("Testing analysis dataset after QC: ", dim_test[1], " × ", dim_test[2], "\n", sep="")
+```
+
+### 1.3 EDA
+
+```{r}
+cat("Training set DX category counts:\n")
+print(train_analysis_qc %>% filter(!is.na(DX)) %>% count(DX, sort=TRUE))
+cat("\nTesting set DX category counts:\n")
+print(test_analysis_qc %>% count(DX, sort=TRUE))
+test_analysis_qc<- test_analysis_qc[!is.na(test_analysis_qc$DX) & test_analysis_qc$DX %in% 0:3, ]
+cat("\nDropping pending:\n")
+print(test_analysis_qc %>% count(DX, sort=TRUE))
+cat("\nTraining set age summary:\n")
+print(summary(train_analysis_qc$Age))
+cat("\nTraining set gender distribution:\n")
+print(table(train_analysis_qc$Gender, useNA="ifany"))
+cat("\nTraining set sites (post-QC):\n")
+print(train_analysis_qc %>% count(Site, sort=TRUE))
+
+combined_analysis <- bind_rows(train_analysis_qc, test_analysis_qc)
+df_mod <- prepare_modeling_data(combined_analysis)
+cat("Modeling dataset dimensions: ", nrow(df_mod), " × ", ncol(df_mod), "\n", sep="")
+
+cat("\nDiagnosis class distribution in modeling dataset:\n")
+print(df_mod %>% count(DX_class))
+cat("\nBinary ADHD vs TDC distribution:\n")
+print(df_mod %>% count(ADHD_bin))
+
+cat("\nHandedness:\n")
+df_mod$Handedness <- as.numeric(df_mod$Handedness)
+df_mod$Handedness[df_mod$Handedness < 0 | df_mod$Handedness > 1] <- NA
+print(summary(df_mod$Handedness))
+cat("\nIQ:\n")
+df_mod$Verbal.IQ[df_mod$Verbal.IQ < 0] <- NA
+df_mod$Performance.IQ[df_mod$Performance.IQ < 0] <- NA
+df_mod$Verbal.IQ <- as.numeric(df_mod$Verbal.IQ)
+df_mod$Performance.IQ <- as.numeric(df_mod$Performance.IQ)
+print(summary(df_mod$Verbal.IQ))
+print(summary(df_mod$Performance.IQ))
+
+cat("\nModeling set age summary:\n")
+print(summary(df_mod$Age))
+cat("\nModeling set gender distribution:\n")
+print(table(df_mod$Gender, useNA="ifany"))
+
+# Range of Fisher z values among all edges
+feature_cols <- grep("^edge_", names(df_mod), value = TRUE)
+summary(unlist(df_mod[, feature_cols]))
+
+# Range of corresponding correlations
+summary(tanh(unlist(df_mod[, feature_cols])))
+
+# Variance of each edge
+edge_sd <- apply(as.matrix(df_mod[, feature_cols]), 2, sd, na.rm = TRUE)
+summary(edge_sd)
+cat("Edges with zero sd:", sum(edge_sd == 0, na.rm = TRUE), "\n")
+```
+
+```{r}
+source("~/Desktop/Projects/ADHD200/adhd200_helper.R")
+
+df_clean <- prep_multiclass_df(df_mod, outcome = "DX_class")
+df_graph <- add_graph_metrics(df_clean)
+
+## Add graph metrics (per-subject network summaries)
+
+## Run stratified 5-fold CV with PCA + graph metrics
+set.seed(123)
+cv_res <- cv_multiclass_gamm(
+  df                  = df_clean,
+  outcome             = "DX_class",
+  K                   = 5,
+  feature_mode        = "pca+graph",
+  smooth_covars       = c("Age"),
+  linear_covars       = c("Gender", "Handedness"),
+  random_effect       = "Site",
+  pca_var_explained   = 0.8,
+  pca_max_pc          = 40,
+  ss_n_subsamples     = 30,  ## smaller for speed in testing
+  ss_subsample_frac   = 0.8,
+  ss_threshold        = 0.6,
+  use_precomputed_graph = TRUE,
+  df_with_graph         = df_graph,
+  seed                = 123
+)
+
+## Inspect CV performance
+cv_res$metrics$accuracy
+cv_res$metrics$macro_F1
+cv_res$metrics$confusion_matrix
+cv_res$metrics$per_class
+
+## Fit a final multi-class GAMM on the full dataset using the same feature strategy
+## (PCA is re-fit on full data; graph metrics are reused from df_graph)
+full_pca <- pca_on_edges(
+  df_train = df_graph,
+  df_test  = NULL,
+  edge_pattern = "^edge_",
+  var_explained = 0.8,
+  max_pc       = 40
+)
+df_full <- full_pca$train
+extra_terms_full <- c(full_pca$pc_cols, attr(df_graph, "graph_metric_cols"))
+
+mc_full <- fit_multiclass_bam_ovr(
+  df           = df_full,
+  outcome      = "DX_class",
+  smooth_covars = c("Age"),
+  linear_covars = c("Gender", "Handedness"),
+  random_effect = "Site",
+  extra_terms   = extra_terms_full
+)
+
+## 6. Diagnostics:
+##    a) Inspect one of the binary GAMMs (e.g., TDC vs rest)
+diagnose_single_bam(mc_full$models[["TDC"]], data = df_full)
+
+##    b) Multi-class diagnostics using CV results
+diagnose_multiclass_ovr(
+  mc_obj = mc_full,
+  cv_res = cv_res,
+  site_var = "Site",
+  df = df_clean
+)
+
+```
+
+## Modeling
+
+```{r}
+## Packages
+library(mgcv)     # GAM/GAMM
+library(glmnet)   # Lasso for stability selection
+library(pbapply)  # Progress bars for loops
+library(pROC)     # AUC
+
+## If you have your helper file:
+## source("adhd200_helpers.R")
+
+## Start from df_mod
+dim(df_clean)
+source("~/Desktop/Projects/ADHD200/adhd200_helper.R")
+```
+
+```{r}
+## Keep only subjects with complete basic phenotypes + Site + ADHD_bin
+required_vars <- c("ADHD_bin", "Age", "Gender",
+                   "Verbal.IQ", "Performance.IQ", "Site")
+
+df_bin <- subset(df_graph, complete.cases(df_mod[, required_vars]))
+
+## Make sure these have the right types
+#df_bin$ADHD_bin      <- as.integer(df_bin$ADHD_bin)  # 0/1
+df_bin$Gender        <- factor(df_bin$Gender)
+df_bin$Site          <- factor(df_bin$Site)
+
+## Identify edge features and (optionally) graph metrics already in df_mod
+edge_cols  <- grep("^edge_",  names(df_bin), value = TRUE)
+graph_cols <- grep("^graph_", names(df_bin), value = TRUE)
+
+length(edge_cols)
+length(graph_cols)
+
+```
+
+```{r}
+table(df_bin$Site)
+
+```
+
+### LOSO-CV
+
+```{r}
+sites      <- levels(df_bin$Site)
+loso_folds <- split(seq_len(nrow(df_bin)), df_bin$Site)
+names(loso_folds) <- sites
+source("~/Desktop/Projects/ADHD200/adhd200_helper.R")
+```
+
+```{r}
+set.seed(123)
+K <- 5
+fold_id <- sample(rep(seq_len(K), length.out = nrow(df_bin)))
+kfolds  <- split(seq_len(nrow(df_bin)), fold_id)
+
+```
+
+```{r}
+set.seed(123)
+
+df_bin = na.omit(df_bin)
+n <- nrow(df_bin)
+cv_pred   <- rep(NA_real_, n)
+cv_site   <- df_bin$Site
+cv_truth  <- df_bin$ADHD_bin
+
+
+## Optionally store which edges were stable per site, for later interpretation
+stab_per_site <- vector("list", length(sites))
+names(stab_per_site) <- sites
+
+for (s in sites) {
+  message("LOSO fold for site: ", s)
+  
+  test_idx  <- loso_folds[[s]]
+  train_idx <- setdiff(seq_len(n), test_idx)
+  
+  d_train <- df_bin[train_idx, ]
+  d_test  <- df_bin[test_idx, ]
+  
+  ## ---- 5.1 Stability selection on training set ----
+  stab <- stability_select_edges(
+    df            = d_train,
+    response      = "ADHD_bin",
+    edge_cols     = edge_cols,
+    pheno_cols    = c("Age","Gender","Verbal.IQ","Performance.IQ"),
+    B             = 50,
+    subsample_frac= 0.5,
+    pi_thr        = 0.2,
+    nfolds_cv     = 5,
+    seed          = 100 + which(sites == s)
+  )
+  
+  sel_edges <- stab$selected_edges
+  stab_per_site[[s]] <- list(
+    selected_edges = sel_edges,
+    selection_frequency = stab$selection_frequency
+  )
+  
+  ## If nothing is selected, you may want to relax pi_thr or skip CPM for this fold.
+  if (length(sel_edges) == 0L) {
+    warning("No edges selected for site ", s, "; CPM features will be zero.")
+  }
+  
+  ## ---- 5.2 CPM summaries on training (signs by correlation) ----
+  cpm_train <- compute_cpm_features(
+    df_train    = d_train,
+    y          = d_train$ADHD_bin,
+    edge_subset = sel_edges
+  )
+  
+  train_cpm <- cpm_train$train_feats
+  pos_edges <- cpm_train$pos_edges
+  neg_edges <- cpm_train$neg_edges
+  
+  ## CPM summaries on the test set using the same edges/signs
+  test_cpm <- make_cpm_from_sets(
+    df_new   = d_test,
+    pos_edges = pos_edges,
+    neg_edges = neg_edges
+  )
+  
+  ## ---- 5.3 Build GAMM training / test data ----
+  base_train <- d_train[, c("ADHD_bin","Age","Gender",
+                            "Verbal.IQ","Performance.IQ","Site"),
+                        drop = FALSE]
+  base_test  <- d_test[,  c("ADHD_bin","Age","Gender",
+                            "Verbal.IQ","Performance.IQ","Site"),
+                        drop = FALSE]
+  
+  train_gamm <- cbind(base_train, train_cpm)
+  test_gamm  <- cbind(base_test,  test_cpm)
+  
+  ## If you want to add graph metrics as well:
+  train_gamm <- cbind(train_gamm, d_train[, graph_cols, drop=FALSE])
+  test_gamm  <- cbind(test_gamm,  d_test[,  graph_cols, drop=FALSE])
+  
+  ## ---- 5.4 Fit logistic GAMM with random Site intercept ----
+  gamm_formula <- ADHD_bin ~
+    s(Age, k = 10) +
+    Gender +
+    s(Verbal.IQ,     k = 10) +
+    s(Performance.IQ,k = 10) +
+    s(net_pos,       k = 10) +
+    s(net_neg,       k = 10) +
+    s(Site, bs = "re")
+  
+  ## If you added graph metrics, extend the formula by + s(metric, k=10) terms.
+  
+  fit <- mgcv::bam(
+    formula  = gamm_formula,
+    data     = train_gamm,
+    family   = binomial(link = "logit"),
+    method   = "fREML",
+    discrete = TRUE,
+    select   = TRUE
+  )
+  
+  ## ---- 5.5 Predict on held-out site ----
+  cv_pred[test_idx] <- as.numeric(
+    predict(fit, newdata = test_gamm, type = "response")
+  )
+}
+
+```
+
+```{r}
+## Check that all predictions are filled
+# stopifnot(all(!is.na(cv_pred)))
+cv_pred =  na.omit(cv_pred)
+
+## AUC
+roc_obj <- pROC::roc(response = cv_truth, predictor = cv_pred)
+auc(roc_obj)
+plot(roc_obj, main = "LOSO AUC (ADHD vs TDC)")
+
+## Classification at 0.5 threshold (or tune the threshold)
+pred_class <- ifelse(cv_pred >= 0.5, 1L, 0L)
+
+table(truth = cv_truth, pred = pred_class)
+
+## Per-site performance (useful for ADHD200)
+site_auc <- tapply(
+  1:length(cv_pred), na.omit(cv_site),
+  function(idx) {
+    pROC::auc(pROC::roc(cv_truth[idx], cv_pred[idx]))
+  }
+)
+site_auc
+
+```
+
+```{r}
+## ---- 7.1 Stability selection on full data ----
+stab_full <- stability_select_edges(
+  df            = df_bin,
+  response      = "ADHD_bin",
+  edge_cols     = edge_cols,
+  pheno_cols    = c("Age","Gender","Verbal.IQ","Performance.IQ"),
+  B             = 200,   # can afford more here
+  subsample_frac= 0.5,
+  pi_thr        = 0.1,
+  nfolds_cv     = 5,
+  seed          = 2025
+)
+
+sel_edges_full <- stab_full$selected_edges
+
+## ---- 7.2 CPM features on full data ----
+cpm_full <- compute_cpm_features(
+  df_train    = df_bin,
+  y           = df_bin$ADHD_bin,
+  edge_subset = sel_edges_full
+)
+
+df_full <- cbind(
+  df_bin[, c("ADHD_bin","Age","Gender",
+             "Verbal.IQ","Performance.IQ","Site"),
+         drop = FALSE],
+  cpm_full$train_feats
+)
+
+## Add graph metrics if you like:
+df_full <- cbind(df_full, df_bin[, graph_cols, drop = FALSE])
+
+## ---- 7.3 Final GAMM ----
+gamm_formula_full <- ADHD_bin ~
+  s(Age, k = 10) +
+  Gender +
+  s(Verbal.IQ,     k = 10) +
+  s(Performance.IQ,k = 10) +
+  s(net_pos,       k = 10) +
+  s(net_neg,       k = 10) +
+  s(Site, bs = "re")
+
+fit_full <- mgcv::bam(
+  formula  = gamm_formula_full,
+  data     = df_full,
+  family   = binomial(link = "logit"),
+  method   = "fREML",
+  discrete = TRUE,
+  select   = TRUE
+)
+
+summary(fit_full)
+plot(fit_full, pages = 1)
+
+```
+
+```{r}
+library(mgcv)
+
+diagnose_binary_gamm <- function(
+  fit,
+  df,
+  response,
+  site_var   = "Site",
+  plot_prefix = ""
+) {
+  stopifnot(inherits(fit, "gam") || inherits(fit, "gamm"))
+
+  # If we got a gamm object, extract the gam component
+  if (inherits(fit, "gamm")) {
+    fit <- fit$gam
+  }
+
+  ## 1. Align data to the fitted model -------------------------------
+
+  # Model frame actually used by mgcv (after NA dropping etc.)
+  mf <- model.frame(fit)
+
+  # This gives the indices (row names) in df that were used
+  # (only works if df rownames still correspond to original data rows)
+  used_rows <- rownames(mf)
+
+  # Subset df to those rows, if df was passed and rownames match
+  if (!is.null(df)) {
+    # If df has rownames, use them; otherwise assume 1:nrow(df)
+    if (is.null(rownames(df))) {
+      # Create rownames so we can safely subset by position
+      rownames(df) <- as.character(seq_len(nrow(df)))
+    }
+    df_used <- df[used_rows, , drop = FALSE]
+  } else {
+    df_used <- mf
+  }
+
+  # Pull out aligned vectors
+  y        <- mf[[response]]
+  fitted   <- fitted(fit)
+  res_dev  <- residuals(fit, type = "deviance")
+  res_pear <- residuals(fit, type = "pearson")
+
+  # Site / grouping variable: try model frame first, then df_used
+  if (!is.null(site_var) && site_var %in% names(mf)) {
+    site_vec <- mf[[site_var]]
+  } else if (!is.null(site_var) && site_var %in% names(df_used)) {
+    site_vec <- df_used[[site_var]]
+  } else {
+    site_vec <- NULL
+    message("diagnose_binary_gamm: site_var '", site_var,
+            "' not found in model.frame(fit) or df; skipping site plots.")
+  }
+
+  ## 2. Basic mgcv checks -------------------------------------------
+
+  cat("\n=== GAM CHECK (k check + residual patterns) ===\n\n")
+  # gam.check prints plots; we let it do its thing
+  print(mgcv::gam.check(fit))
+
+  ## 3. Concurvity ---------------------------------------------------
+
+  cat("\n=== CONCURVITY (nonlinear collinearity diagnostics) ===\n")
+  conc <- mgcv::concurvity(fit, full = TRUE)
+
+  if (is.list(conc)) {
+    # mgcv versions that return a list with components estimate/observed/worst
+    if (!is.null(conc$estimate)) {
+      cat("\nEstimate:\n")
+      print(round(conc$estimate, 3))
+    }
+    if (!is.null(conc$observed)) {
+      cat("\nObserved:\n")
+      print(round(conc$observed, 3))
+    }
+    if (!is.null(conc$worst)) {
+      cat("\nWorst-case:\n")
+      print(round(conc$worst, 3))
+    }
+  } else {
+    # mgcv versions that return a single matrix or numeric object
+    print(round(conc, 3))
+  }
+
+
+  ## 4. Residual vs fitted & linear predictor -----------------------
+
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+
+  par(mfrow = c(2, 2))
+
+  plot(
+    fitted, res_dev,
+    xlab = "Fitted values",
+    ylab = "Deviance residuals",
+    main = paste0(plot_prefix, "Residuals vs fitted")
+  )
+  abline(h = 0, col = "grey60", lty = 2)
+
+  # Linear predictor
+  eta_hat <- fit$linear.predictors
+  plot(
+    eta_hat, res_dev,
+    xlab = "Linear predictor (eta)",
+    ylab = "Deviance residuals",
+    main = paste0(plot_prefix, "Residuals vs linear predictor")
+  )
+  abline(h = 0, col = "grey60", lty = 2)
+
+  # QQ-plot of deviance residuals
+  qqnorm(
+    res_dev,
+    main = paste0(plot_prefix, "QQ-plot deviance residuals")
+  )
+  qqline(res_dev, col = "red")
+
+  # Histogram of deviance residuals
+  hist(
+    res_dev,
+    breaks = 40,
+    main   = paste0(plot_prefix, "Deviance residuals"),
+    xlab   = "Deviance residual"
+  )
+
+  ## 5. Site-level diagnostics (aligned!) ----------------------------
+
+  if (!is.null(site_vec)) {
+    par(mfrow = c(1, 2))
+
+    boxplot(
+      res_dev ~ site_vec,
+      main = paste0("Deviance residuals by ", site_var),
+      xlab = site_var,
+      ylab = "Deviance residuals",
+      las  = 2
+    )
+    abline(h = 0, col = "grey60", lty = 2)
+
+    # Random effect term for site, if present
+    if (any(grepl("^s\\(", names(fit$smooth)))) {
+      site_smooth_ids <- vapply(
+        fit$smooth,
+        function(sm) sm$bs[1] == "re" && sm$term[1] == site_var,
+        logical(1)
+      )
+
+      if (any(site_smooth_ids)) {
+        sm <- fit$smooth[[which(site_smooth_ids)[1]]]
+        re_vals <- mgcv::ranef(fit)[[sm$label]]
+
+        # Reorder sites by effect
+        ord <- order(re_vals)
+        barplot(
+          re_vals[ord],
+          names.arg = names(re_vals)[ord],
+          las = 2,
+          main = paste0("Random intercepts by ", site_var),
+          ylab = "Random effect (scale of linear predictor)"
+        )
+        abline(h = 0, col = "grey60", lty = 2)
+      }
+    }
+  }
+
+  invisible(
+    list(
+      df_used   = df_used,
+      y         = y,
+      fitted    = fitted,
+      res_dev   = res_dev,
+      res_pear  = res_pear,
+      site      = site_vec,
+      concurvity = conc
+    )
+  )
+}
+
+
+```
+
+```{r}
+diag_res <- diagnose_binary_gamm(
+  fit      = fit_full,
+  df       = df_mod,
+  response = "ADHD_bin",
+  site_var = "Site",
+  plot_prefix = "ADHD_bin model: "
+)
+
+```
+
+```{r}
+library(igraph)
+
+parse_edge_names <- function(edge_names, prefix = "^edge_") {
+  stripped <- sub(prefix, "", edge_names)
+  parts <- strsplit(stripped, "_")
+  roi1 <- vapply(parts, `[`, character(1), 1L)
+  roi2 <- vapply(parts, `[`, character(1), 2L)
+  
+  data.frame(
+    edge = edge_names,
+    roi1 = roi1,
+    roi2 = roi2,
+    stringsAsFactors = FALSE
+  )
+}
+
+## Example:
+edge_cols <- grep("^edge_", names(df_mod), value = TRUE)
+edge_info <- parse_edge_names(edge_cols)
+head(edge_info)
+
+
+```
+
+```{r}
+compute_group_edge_stats <- function(df, edge_cols, group_var = "ADHD_bin") {
+  g <- df[[group_var]]
+  if (!all(g %in% c(0, 1))) {
+    stop("Group variable must be coded 0/1 for this helper.")
+  }
+  
+  X <- as.matrix(df[, edge_cols, drop = FALSE])
+  
+  grp0 <- X[g == 0, , drop = FALSE]
+  grp1 <- X[g == 1, , drop = FALSE]
+  
+  m0 <- colMeans(grp0, na.rm = TRUE)
+  m1 <- colMeans(grp1, na.rm = TRUE)
+  
+  v0 <- apply(grp0, 2, var, na.rm = TRUE)
+  v1 <- apply(grp1, 2, var, na.rm = TRUE)
+  
+  pooled_sd <- sqrt((v0 + v1) / 2)
+  
+  mean_diff <- m1 - m0          # ADHD - TD
+  cohen_d   <- mean_diff / pooled_sd
+  
+  data.frame(
+    edge      = edge_cols,
+    mean_TD   = m0,
+    mean_ADHD = m1,
+    mean_diff = mean_diff,
+    cohen_d   = cohen_d,
+    stringsAsFactors = FALSE
+  )
+}
+
+## Example:
+edge_cols <- grep("^edge_", names(df_mod), value = TRUE)
+edge_stats <- compute_group_edge_stats(df_mod, edge_cols, group_var = "ADHD_bin")
+head(edge_stats)
+
+```
+
+```{r}
+edges_to_adjacency <- function(edge_info, weights, fill = 0) {
+  roi_ids <- sort(unique(c(edge_info$roi1, edge_info$roi2)))
+  n <- length(roi_ids)
+  
+  A <- matrix(fill, n, n)
+  rownames(A) <- colnames(A) <- roi_ids
+  
+  w <- weights[edge_info$edge]
+  if (any(is.na(w))) {
+    warning("Some edges have NA weights; setting them to 0.")
+    w[is.na(w)] <- 0
+  }
+  
+  for (i in seq_len(nrow(edge_info))) {
+    r1 <- as.character(edge_info$roi1[i])
+    r2 <- as.character(edge_info$roi2[i])
+    A[r1, r2] <- A[r2, r1] <- w[i]
+  }
+  A
+}
+
+make_weighted_graph <- function(edge_info, weights, threshold = NULL) {
+  w <- weights[edge_info$edge]
+  if (!is.null(threshold)) {
+    keep <- which(abs(w) >= threshold)
+    edge_info <- edge_info[keep, , drop = FALSE]
+    w <- w[keep]
+  }
+  
+  g <- graph_from_data_frame(
+    d = data.frame(
+      from   = edge_info$roi1,
+      to     = edge_info$roi2,
+      weight = w
+    ),
+    directed = FALSE
+  )
+  E(g)$weight <- w
+  g
+}
+
+```
+
+```{r}
+## join edge_stats with edge_info
+edge_stats2 <- merge(edge_info, edge_stats, by = "edge")
+
+## threshold: keep top 1% of edges by |cohen_d|
+k <- max(1, floor(0.01 * nrow(edge_stats2)))
+ord <- order(abs(edge_stats2$cohen_d), decreasing = TRUE)
+sel_idx <- ord[seq_len(k)]
+
+g_diff <- make_weighted_graph(
+  edge_info = edge_stats2[sel_idx, c("edge", "roi1", "roi2")],
+  weights   = setNames(edge_stats2$cohen_d, edge_stats2$edge)
+)
+
+g_diff
+
+```
+
+```{r}
+compute_graph_metrics <- function(g, weight_attr = "weight") {
+  if (is.null(E(g)$weight)) {
+    E(g)$weight <- rep(1, gsize(g))
+  }
+  w <- E(g)$weight
+  
+  ## Weighted and unweighted degree
+  deg_unweighted <- degree(g, mode = "all")
+  strength_all   <- strength(g, mode = "all", weights = w)
+  strength_pos   <- strength(g, mode = "all", weights = pmax(w, 0))
+  strength_neg   <- strength(g, mode = "all", weights = pmax(-w, 0))
+  
+  ## Centralities (weights interpreted as similarity)
+  w_inv <- 1 / pmax(abs(w), 1e-6)   # for distance-based measures
+  betw <- betweenness(g, directed = FALSE, weights = w_inv, normalized = TRUE)
+  clos <- closeness(g, normalized = TRUE, weights = w_inv)
+  eig  <- eigen_centrality(g, weights = abs(w))$vector
+  
+  ## Community structure (Louvain on |weights|)
+  comm <- cluster_louvain(g, weights = abs(w))
+  
+  data.frame(
+    roi              = names(deg_unweighted),
+    degree           = as.numeric(deg_unweighted),
+    strength_all     = as.numeric(strength_all),
+    strength_pos     = as.numeric(strength_pos),
+    strength_neg     = as.numeric(strength_neg),
+    betweenness      = as.numeric(betw),
+    closeness        = as.numeric(clos),
+    eigencentrality  = as.numeric(eig),
+    community        = membership(comm)[names(deg_unweighted)],
+    stringsAsFactors = FALSE
+  )
+}
+
+## Example for ADHD–TD difference network:
+metrics_diff <- compute_graph_metrics(g_diff)
+head(metrics_diff[order(-metrics_diff$strength_all), ])
+
+```
+
+```{r}
+## Polished connectivity matrix plot with color legend
+plot_connectivity_matrix <- function(A,
+                                     main = "Connectivity",
+                                     legend.title = "Cohen's d") {
+  stopifnot(is.matrix(A), nrow(A) == ncol(A))
+
+  n <- nrow(A)
+
+  ## Diverging palette: negative (blue) → 0 (white) → positive (red)
+  pal <- colorRampPalette(c("blue", "white", "red"))(100)
+
+  ## Symmetric colour scale around 0
+  zlim   <- range(A, finite = TRUE)
+  zmax   <- max(abs(zlim))
+  zlim   <- c(-zmax, zmax)
+  breaks <- seq(zlim[1], zlim[2], length.out = length(pal) + 1)
+
+  ## Layout: main image + legend on the right
+  layout(matrix(c(1, 2), nrow = 1), widths = c(4, 1))
+
+  ## --- Main image ---
+  par(mar = c(5, 5, 4, 1))  # bottom, left, top, right
+  image(
+    x = 1:n, y = 1:n, z = t(A)[, n:1],
+    xlab = "ROI", ylab = "ROI", main = main,
+    col = pal, breaks = breaks,
+    axes = FALSE
+  )
+  box()
+
+  ## Optional axis labels (turn off if too many ROIs)
+  axis(1, at = 1:n, labels = rownames(A), las = 2, cex.axis = 0.5)
+  axis(2, at = 1:n, labels = rev(colnames(A)), las = 2, cex.axis = 0.5)
+
+  ## --- Color legend ---
+  par(mar = c(5, 2, 4, 4))
+  plot(NA,
+       xlim = c(0, 1), ylim = zlim,
+       xaxt = "n", yaxt = "n",
+       xlab = "", ylab = legend.title,
+       main = "")
+  for (i in seq_along(pal)) {
+    rect(
+      xleft  = 0,
+      xright = 1,
+      ybottom = breaks[i],
+      ytop    = breaks[i + 1],
+      col     = pal[i],
+      border  = NA
+    )
+  }
+  axis(4, at = pretty(zlim))
+  box()
+
+  ## Reset layout
+  layout(1)
+}
+
+
+plot_connectivity_matrix(A_d, main = "ADHD - TD connectivity (Cohen's d)")
+
+```
+
+\
