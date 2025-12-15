@@ -1,0 +1,26 @@
+#' Simulate St Petersburg game payoffs
+#'
+#' Generates \code{n} independent draws from the St Petersburg distribution
+#' where \eqn{P(X = 2^k) = 2^{-k}} for \eqn{k = 1, 2, \dots}.
+#'
+#' @param n Integer; number of samples to draw.
+#' @param seed Optional integer seed for reproducibility. If \code{NULL}, the
+#'   current RNG state is used.
+#'
+#' @return A numeric vector of length \code{n} containing the simulated payoffs.
+#'
+#' @details
+#' The payoffs are constructed as \eqn{X = 2^K}, where \eqn{K} has a geometric
+#' distribution with success probability 1/2. Note that \eqn{E[X] = \infty}.
+#'
+#' @examples
+#' set.seed(1)
+#' x <- r_stpetersburg(10)
+#' summary(x)
+#'
+#' @export
+r_stpetersburg <- function(n, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  K = stats::rgeom(n, prob = 0.5) + 1
+  2^K
+}

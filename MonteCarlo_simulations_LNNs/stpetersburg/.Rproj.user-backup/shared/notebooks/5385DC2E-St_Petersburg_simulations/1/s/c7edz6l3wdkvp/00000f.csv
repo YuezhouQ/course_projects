@@ -1,3 +1,0 @@
-"0","# Compute average N_n(c) for each sample size  "
-"0","avg_N <- aggregate(N_n ~ n, data = sim_data, FUN = mean)  "
-"0","print(avg_N)  "

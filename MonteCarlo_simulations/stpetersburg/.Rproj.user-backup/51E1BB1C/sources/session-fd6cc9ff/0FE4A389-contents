@@ -1,0 +1,664 @@
+---
+title: "506HW5"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+editor: visual
+---
+
+### Acknowledgement: This assignment made use of ChatGPT-5 to assist with generating coding ideas, debugging, and refining the writing.
+
+## Problem 1
+
+### (a)
+
+```{r}
+#' Wald-style normal-approximation confidence interval
+#'
+#' Objects of class \code{waldCI} represent symmetric normal-approximation
+#' confidence intervals of the form
+#'   mean +/- z_{1 - alpha/2} * sterr,
+#' with \code{level = 1 - alpha}.
+#'
+#' @slot mean  Numeric scalar: point estimate.
+#' @slot sterr Numeric scalar: standard error (> 0).
+#' @slot level Numeric scalar: confidence level in (0, 1).
+#' @exportClass waldCI
+setClass(
+  "waldCI",
+  slots = list(
+    mean  = "numeric",
+    sterr = "numeric",
+    level = "numeric"
+  ),
+  validity = function(object) {
+    msgs = character()
+
+    ## mean
+    if (length(object@mean) != 1L || !is.finite(object@mean)) {
+      msgs = c(msgs, "Slot 'mean' must be a single finite numeric value.")
+    }
+
+    ## sterr
+    if (length(object@sterr) != 1L || !is.finite(object@sterr)) {
+      msgs = c(msgs, "Slot 'sterr' must be a single finite numeric value.")
+    } else if (object@sterr <= 0) {
+      msgs = c(msgs, "Standard error 'sterr' must be strictly positive.")
+    }
+
+    ## level
+    if (length(object@level) != 1L || !is.finite(object@level)) {
+      msgs = c(msgs, "Slot 'level' must be a single finite numeric value.")
+    } else if (object@level <= 0 || object@level >= 1) {
+      msgs = c(msgs, "Slot 'level' must lie strictly between 0 and 1.")
+    }
+
+    ## implied bounds
+    if (!length(msgs)) {
+      z = qnorm((1 + object@level) / 2)
+      lb = object@mean - z * object@sterr
+      ub = object@mean + z * object@sterr
+
+      if (!is.finite(lb) || !is.finite(ub)) {
+        msgs = c(msgs, "Infinite confidence bounds are not allowed for 'waldCI'.")
+      } else if (lb >= ub) {
+        msgs = c(msgs, "Lower bound must be strictly less than upper bound.")
+      }
+    }
+
+    if (length(msgs)) msgs else TRUE
+  }
+)
+
+## Constructors
+
+#' Construct a \code{waldCI} object
+#'
+#' You must supply either:
+#' \itemize{
+#'   \item \code{mean} and \code{sterr}, or
+#'   \item \code{lb} and \code{ub}.
+#' }
+#'
+#' @param level Confidence level in (0, 1).
+#' @param mean  Optional numeric scalar: point estimate.
+#' @param sterr Optional numeric scalar: standard error.
+#' @param lb,ub Optional numeric scalars: lower and upper bounds.
+#'
+#' @return A validated \code{waldCI} object.
+#' @export
+waldCI = function(level, mean, sterr, lb, ub) {
+  if (missing(level)) {
+    stop("Argument 'level' must be supplied.")
+  }
+
+  have_mean  = !missing(mean)
+  have_sterr = !missing(sterr)
+  have_lb    = !missing(lb)
+  have_ub    = !missing(ub)
+
+  ## enforce either (mean,sterr) or (lb,ub), but not mixtures
+  if (have_mean || have_sterr) {
+    if (!(have_mean && have_sterr)) {
+      stop("If supplying 'mean' and 'sterr', both must be given.")
+    }
+  }
+  if (have_lb || have_ub) {
+    if (!(have_lb && have_ub)) {
+      stop("If supplying 'lb' and 'ub', both must be given.")
+    }
+  }
+  if ((have_mean && have_sterr) && (have_lb || have_ub)) {
+    stop("Supply either ('mean','sterr') or ('lb','ub'), but not both.")
+  }
+  if (!(have_mean && have_sterr) && !(have_lb && have_ub)) {
+    stop("Supply either ('mean','sterr') or ('lb','ub').")
+  }
+
+  level = as.numeric(level)
+  if (length(level) != 1L) {
+    stop("'level' must be a scalar.")
+  }
+
+  if (have_lb && have_ub) {
+    lb = as.numeric(lb)
+    ub = as.numeric(ub)
+    if (length(lb) != 1L || length(ub) != 1L) {
+      stop("'lb' and 'ub' must be scalar numerics.")
+    }
+    z = qnorm((1 + level) / 2)
+    mean  = (lb + ub) / 2
+    sterr = (ub - lb) / (2 * z)
+  } else {
+    mean  = as.numeric(mean)
+    sterr = as.numeric(sterr)
+  }
+
+  obj = new("waldCI", mean = mean, sterr = sterr, level = level)
+  validObject(obj)
+  obj
+}
+
+## Accessor Generics
+
+#' @export
+setGeneric("level", function(object) standardGeneric("level"))
+
+#' @export
+setGeneric("sterr", function(object) standardGeneric("sterr"))
+
+#' @export
+setGeneric("lb", function(object) standardGeneric("lb"))
+
+#' @export
+setGeneric("ub", function(object) standardGeneric("ub"))
+
+## Accessor methods
+
+#' @describeIn waldCI Get the mean of the CI
+setMethod("mean", "waldCI", function(x, ...) x@mean)
+
+#' @describeIn waldCI Get the confidence level
+setMethod("level", "waldCI", function(object) object@level)
+
+#' @describeIn waldCI Get the standard error
+setMethod("sterr", "waldCI", function(object) object@sterr)
+
+#' @describeIn waldCI Get the lower bound
+setMethod("lb", "waldCI", function(object) {
+  z = qnorm((1 + object@level) / 2)
+  object@mean - z * object@sterr
+})
+
+#' @describeIn waldCI Get the upper bound
+setMethod("ub", "waldCI", function(object) {
+  z = qnorm((1 + object@level) / 2)
+  object@mean + z * object@sterr
+})
+
+# Setter generics
+
+#' @export
+setGeneric("level<-", function(object, value) standardGeneric("level<-"))
+
+#' @export
+setGeneric("sterr<-", function(object, value) standardGeneric("sterr<-"))
+
+#' @export
+setGeneric("lb<-", function(object, value) standardGeneric("lb<-"))
+
+#' @export
+setGeneric("ub<-", function(object, value) standardGeneric("ub<-"))
+
+#' @export
+setGeneric("mean<-", function(object, value) standardGeneric("mean<-"))
+
+## Setter methods
+
+#' @describeIn waldCI Set the confidence level
+setReplaceMethod("level", "waldCI",
+  function(object, value) {
+    value = as.numeric(value)
+    waldCI(
+      level = value,
+      mean  = mean(object),
+      sterr = sterr(object)
+    )
+  }
+)
+
+#' @describeIn waldCI Set the standard error
+setReplaceMethod("sterr", "waldCI",
+  function(object, value) {
+    value = as.numeric(value)
+    waldCI(
+      level = level(object),
+      mean  = mean(object),
+      sterr = value
+    )
+  }
+)
+
+#' @describeIn waldCI Set the lower bound
+setReplaceMethod("lb", "waldCI",
+  function(object, value) {
+    value = as.numeric(value)
+    waldCI(
+      level = level(object),
+      lb    = value,
+      ub    = ub(object)
+    )
+  }
+)
+
+#' @describeIn waldCI Set the upper bound
+setReplaceMethod("ub", "waldCI",
+  function(object, value) {
+    value = as.numeric(value)
+    waldCI(
+      level = level(object),
+      lb    = lb(object),
+      ub    = value
+    )
+  }
+)
+
+#' @describeIn waldCI Set the mean
+setReplaceMethod("mean", "waldCI",
+  function(object, value) {
+    value = as.numeric(value)
+    waldCI(
+      level = level(object),
+      mean  = value,
+      sterr = sterr(object)
+    )
+  }
+)
+
+
+## Show method
+
+#' @export
+setMethod(
+  "show", "waldCI",
+  function(object) {
+    z  = qnorm((1 + object@level) / 2)
+    lo = object@mean - z * object@sterr
+    hi = object@mean + z * object@sterr
+
+    cat("Wald-style normal CI\n")
+    cat(sprintf("  level   : %.1f%%\n", 100 * object@level))
+    cat(sprintf("  mean    : %g\n", object@mean))
+    cat(sprintf("  sterr   : %g\n", object@sterr))
+    cat(sprintf("  interval: [%g, %g]\n", lo, hi))
+  }
+)
+
+
+## Coercion to numeric
+
+#' @export
+setMethod(
+  "as.numeric", "waldCI",
+  function(x, ...) c(lb(x), ub(x))
+)
+
+## Contain & overlap methods
+
+#' Test whether a value lies inside a \code{waldCI}
+#'
+#' @param x A \code{waldCI} object.
+#' @param value Numeric vector of values to test.
+#' @return Logical vector: TRUE where \code{value} lies in the CI.
+#' @export
+setGeneric("contains", function(x, value) standardGeneric("contains"))
+
+#' @export
+setMethod(
+  "contains",
+  signature(x = "waldCI", value = "numeric"),
+  function(x, value) {
+    lo = lb(x)
+    hi = ub(x)
+    value >= lo & value <= hi
+  }
+)
+
+#' Test whether two \code{waldCI} objects overlap
+#'
+#' @param x,y \code{waldCI} objects.
+#' @return Logical scalar: TRUE if the intervals intersect.
+#' @export
+setGeneric("overlap", function(x, y) standardGeneric("overlap"))
+
+#' @export
+setMethod(
+  "overlap",
+  signature(x = "waldCI", y = "waldCI"),
+  function(x, y) {
+    max(lb(x), lb(y)) <= min(ub(x), ub(y))
+  }
+)
+
+## TransformCI method
+
+#' Transform a \code{waldCI} through a monotone function
+#'
+#' @param ci A \code{waldCI} object.
+#' @param f  A real-valued function to apply to the interval endpoints.
+#' @param grid_points Integer; number of grid points used to check
+#'   monotonicity of \code{f} over the CI (default 21).
+#' @param tol Numeric tolerance for monotonicity checks.
+#'
+#' @details The function \code{f} is applied to a grid of points between
+#'   the lower and upper bounds of the CI. The resulting values must be
+#'   monotone (nondecreasing or nonincreasing) within tolerance, otherwise
+#'   an error is thrown. The transformed CI is then the interval covering
+#'   the transformed grid values, with the same confidence level.
+#'
+#' @return A new \code{waldCI} object for the transformed parameter.
+#' @export
+transformCI = function(ci, f, grid_points = 21L,
+                       tol = sqrt(.Machine$double.eps)) {
+  if (!is(ci, "waldCI")) {
+    stop("'ci' must be a 'waldCI' object.")
+  }
+  if (!is.function(f)) {
+    stop("'f' must be a function.")
+  }
+  if (!is.numeric(grid_points) || length(grid_points) != 1L ||
+      grid_points < 2L) {
+    stop("'grid_points' must be a scalar integer >= 2.")
+  }
+
+  grid_points = as.integer(grid_points)
+
+  lo = lb(ci)
+  hi = ub(ci)
+
+  if (!is.finite(lo) || !is.finite(hi)) {
+    stop("Cannot transform a CI with non-finite bounds.")
+  }
+
+  x_grid = seq(from = lo, to = hi, length.out = grid_points)
+  y_grid = f(x_grid)
+
+  if (!is.numeric(y_grid) || length(y_grid) != length(x_grid)) {
+    stop("Function 'f' must return a numeric vector of the same length ",
+         "when applied to a numeric vector.")
+  }
+  if (any(!is.finite(y_grid))) {
+    stop("Transform produced NA/Inf values on the CI grid.")
+  }
+
+  # Monotonicity check
+  dy = diff(y_grid)
+  inc_ok = all(dy >= -tol)
+  dec_ok = all(dy <=  tol)
+
+  if (!inc_ok && !dec_ok) {
+    stop("Function 'f' is not monotone on the CI interval (within tolerance).")
+  }
+
+  # Transformed interval
+  new_lo = min(y_grid)
+  new_hi = max(y_grid)
+
+  # Build new CI
+  waldCI(
+    level = level(ci),
+    lb    = new_lo,
+    ub    = new_hi
+  )
+}
+
+```
+
+### (b)
+
+```{r}
+ci1 <- waldCI(level = 0.95, lb = 17.2,  ub = 24.7)
+ci2 <- waldCI(level = 0.99, mean = 13,  sterr = 2.5)
+ci3 <- waldCI(level = 0.75, lb = 27.43, ub = 39.22)
+
+ci1
+ci2
+ci3
+as.numeric(ci1)
+as.numeric(ci2)
+as.numeric(ci3)
+lb(ci2)
+ub(ci2)
+mean(ci1)
+sterr(ci3)
+level(ci2)
+lb(ci2)   <- 10.5
+mean(ci3) <- 34
+level(ci3) <- 0.8
+contains(ci1, 17)
+contains(ci3, 44)
+overlap(ci1, ci2)
+eci1 <- transformCI(ci1, sqrt)
+eci1
+mean(transformCI(ci2, log))
+
+```
+
+### (c)
+
+```{r}
+# Helper function to print outcome
+run_bad = function(label, expr) {
+  cat("\n---", label, "---\n")
+  res = try(eval(expr), silent = TRUE)
+  print(res)
+  invisible(res)
+}
+
+# 1. Negative standard error at construction
+bad1 = run_bad(
+  "Negative standard error at construction",
+  quote(waldCI(level = 0.95, mean = 10, sterr = -2))
+)
+
+# 2. lb > ub at construction
+bad2 = run_bad(
+  "Lower bound greater than upper bound",
+  quote(waldCI(level = 0.95, lb = 5, ub = 3))
+)
+
+# 3. Infinite bounds induced by mean / sterr / level
+bad3 = run_bad(
+  "Infinite bounds via huge sterr",
+  quote(waldCI(level = 0.9999999, mean = 0, sterr = 1e308))
+)
+
+# 4. Invalid use of setters: make sterr negative
+ci_ok = waldCI(level = 0.95, mean = 10, sterr = 2)
+
+bad4 = run_bad(
+  "Setter: negative sterr",
+  quote({
+    tmp = ci_ok
+    sterr(tmp) = -1   # should fail through constructor + validity
+    tmp
+  })
+)
+
+# 5. Invalid use of setters: level outside (0,1)
+bad5 = run_bad(
+  "Setter: level outside (0,1)",
+  quote({
+    tmp = ci_ok
+    level(tmp) = 1.5
+    tmp
+  })
+)
+
+# 6. Setter creates lb > ub
+bad6 = run_bad(
+  "Setter: lb > ub",
+  quote({
+    tmp = ci_ok
+    lb(tmp) = ub(tmp) + 1
+    tmp
+  })
+)
+```
+
+## Problem 3
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(plotly)
+
+covid <- read.csv(
+  "https://raw.githubusercontent.com/nytimes/covid-19-data/refs/heads/master/rolling-averages/us-states.csv",
+  stringsAsFactors = FALSE
+)
+
+covid <- covid %>%
+  mutate(date = ymd(date)) %>%
+  rename(
+    Date  = date,
+    State = state
+  )
+
+str(covid)[1:10]
+```
+
+### (a)
+
+```{r}
+covid_us <- covid %>%
+  group_by(Date) %>%
+  summarize(
+    cases_avg = sum(cases_avg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p3a <- plot_ly(
+  covid_us,
+  x = ~Date,
+  y = ~cases_avg,
+  type = "scatter",
+  mode = "lines",
+  fill = "tozeroy",
+  hovertemplate = paste(
+    "Date: %{x}<br>",
+    "7-day average cases: %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "U.S. daily COVID-19 cases (7-day average)",
+    xaxis = list(title = "Date"),
+    yaxis = list(title = "Daily cases (7-day average)"),
+    showlegend = FALSE
+  )
+
+p3a 
+```
+
+From the national 7-day average plot, there are about four major spikes in cases and a few smaller peaks in between.
+
+### (b)
+
+```{r}
+# Overall cumulative cases per 100k
+state_totals <- covid %>%
+  group_by(State) %>%
+  summarize(
+    total_cases_per_100k = sum(cases_avg_per_100k, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+high_state <- state_totals %>%
+  slice_max(total_cases_per_100k, n = 1, with_ties = FALSE) %>%
+  pull(State)
+
+low_state <- state_totals %>%
+  slice_min(total_cases_per_100k, n = 1, with_ties = FALSE) %>%
+  pull(State)
+
+states_hilo <- c(high_state, low_state)
+
+covid_hilo <- covid %>%
+  filter(State %in% states_hilo)
+
+p3b <- plot_ly(
+  covid_hilo,
+  x = ~Date,
+  y = ~cases_avg_per_100k,
+  color = ~State,
+  colors = c("#d73027", "#4575b4"),
+  type = "scatter",
+  mode = "lines",
+  hovertemplate = paste(
+    "%{color}<br>",
+    "Date: %{x}<br>",
+    "Cases per 100k (7-day avg): %{y:.1f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = paste0(
+      "States with highest vs lowest cumulative COVID-19 rates per 100k\n(",
+      high_state, " vs ", low_state, ")"
+    ),
+    xaxis = list(title = "Date"),
+    yaxis = list(title = "Daily cases per 100k (7-day average)"),
+    legend = list(title = list(text = "State"))
+  )
+
+p3b
+
+```
+
+According to the plot, the highest state (Rhode Island) consistently shows taller and sharper peaks comparing to the lowest state (Maine). Also, the biggest difference is the spike in winter 21-22 did not seem to affect Maine, while increasing rates around 10-fold in Rhode Island.
+
+### (c)
+
+```{r}
+# Restrict to 2020 and define threshold
+covid_2020 <- covid %>%
+  filter(year(Date) == 2020)
+
+threshold <- 20  # cases per 100k
+
+# First date when each state crosses the threshold
+first_above <- covid_2020 %>%
+  filter(cases_avg_per_100k >= threshold) %>%
+  group_by(State) %>%
+  summarize(first_date = min(Date), .groups = "drop") %>%
+  arrange(first_date)
+
+early5 <- first_above %>% slice_head(n = 5)
+early5
+
+early_states <- early5$State
+
+# Focus on spring 2020 for visualization
+covid_spring <- covid_2020 %>%
+  filter(month(Date) %in% 3:6)
+
+# Plot all states in grey, highlight the earliest five in color
+p3c <- plot_ly() %>%
+  add_lines(
+    data = covid_spring,
+    x = ~Date,
+    y = ~cases_avg_per_100k,
+    split = ~State,
+    line = list(color = "rgba(180,180,180,0.4)", width = 0.5),
+    hoverinfo = "none",
+    showlegend = FALSE
+  ) %>%
+  add_lines(
+    data = covid_spring %>% filter(State %in% early_states),
+    x = ~Date,
+    y = ~cases_avg_per_100k,
+    color = ~State,
+    colors = c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00"),
+    line = list(width = 2),
+    hovertemplate = paste(
+      "%{color}<br>",
+      "Date: %{x}<br>",
+      "Cases per 100k (7-day avg): %{y:.1f}<extra></extra>"
+    )
+  ) %>%
+  layout(
+    title = paste0(
+      "Earliest states to exceed ", threshold,
+      " daily COVID-19 cases per 100k (spring 2020)"
+    ),
+    xaxis = list(
+      title = "Month of 2020",
+      range = c(as.Date("2020-03-01"), as.Date("2020-06-15"))
+    ),
+    yaxis = list(title = "Cases per 100k (7-day average)")
+  )
+
+p3c
+```
+
+Using the threshold for “substantial” spread (e.g., 20 daily cases per 100k), the first five places to cross it are New York, New Jersey, Louisiana, Connecticut, and Guam.
